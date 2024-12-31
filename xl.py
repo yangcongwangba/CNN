@@ -3,9 +3,9 @@ import json
 import tensorflow as tf
 from tensorflow.keras import layers, models
 import pathlib
-import numpy as np
-import matplotlib.pyplot as plt
-from tkinter import Tk, Button, Label, Entry, filedialog, messagebox, Checkbutton, BooleanVar
+from tkinter import Tk, Button, Label, Entry, filedialog, messagebox, Checkbutton, BooleanVar, Scale, Frame
+import threading
+from threading import Lock
 
 # 配置GPU
 gpus = tf.config.list_physical_devices("GPU")
@@ -17,12 +17,21 @@ if gpus:
 # 创建主窗口
 root = Tk()
 root.title("图像分类模型训练")
-root.geometry("400x300")
+root.geometry("600x600")
 
 # 全局变量
 data_dir = None
 pretrained_model_path = None
 use_pretrained = False
+continue_training = False
+model_to_continue = None
+stop_training = False  # 用于控制是否停止训练
+stop_training_lock = Lock()  # 用于线程安全的锁
+
+# 默认值
+DEFAULT_BATCH_SIZE = 32
+DEFAULT_IMG_HEIGHT = 180
+DEFAULT_IMG_WIDTH = 180
 
 # 选择数据集文件夹
 def select_data_dir():
@@ -46,9 +55,49 @@ def select_pretrained_model():
     else:
         messagebox.showwarning("警告", "未选择预训练模型文件！")
 
-# 开始训练
-def start_training():
-    global data_dir, pretrained_model_path, use_pretrained
+# 选择继续训练的模型文件
+def select_model_to_continue():
+    global model_to_continue
+    model_to_continue = filedialog.askopenfilename(
+        title="选择继续训练的模型文件",
+        filetypes=[("H5 文件", "*.h5"), ("Keras 文件", "*.keras")]
+    )
+    if model_to_continue:
+        continue_model_label.config(text=f"继续训练模型路径: {model_to_continue}")
+    else:
+        messagebox.showwarning("警告", "未选择继续训练的模型文件！")
+
+# 停止训练
+def stop_training_callback():
+    global stop_training
+    with stop_training_lock:
+        stop_training = True
+    stop_button.config(state="disabled")  # 禁用停止按钮
+    messagebox.showinfo("提示", "训练将在当前轮次完成后停止...")
+
+# 更新训练参数显示
+def update_training_status(epoch, logs):
+    current_epoch_label.config(text=f"当前轮数: {epoch + 1}")
+    train_loss_label.config(text=f"训练损失: {logs['loss']:.4f}")
+    train_acc_label.config(text=f"训练准确率: {logs['accuracy']:.4f}")
+    val_loss_label.config(text=f"验证损失: {logs['val_loss']:.4f}")
+    val_acc_label.config(text=f"验证准确率: {logs['val_accuracy']:.4f}")
+    root.update_idletasks()  # 更新界面
+
+# 自定义回调以支持停止训练
+class StopTrainingCallback(tf.keras.callbacks.Callback):
+    def __init__(self, stop_training_flag):
+        super().__init__()
+        self.stop_training_flag = stop_training_flag
+
+    def on_epoch_end(self, epoch, logs=None):
+        with stop_training_lock:
+            if self.stop_training_flag:
+                self.model.stop_training = True
+
+# 训练任务
+def train_task():
+    global data_dir, pretrained_model_path, use_pretrained, continue_training, model_to_continue, stop_training
 
     if not data_dir or not data_dir.exists():
         messagebox.showerror("错误", "数据集文件夹不存在或未选择！")
@@ -59,14 +108,23 @@ def start_training():
         messagebox.showerror("错误", "预训练模型文件不存在或未选择！")
         return
 
-    # 数据加载和预处理
-    batch_size = 32
-    img_height = 180
-    img_width = 180
+    continue_training = continue_training_var.get()
+    if continue_training and (not model_to_continue or not os.path.exists(model_to_continue)):
+        messagebox.showerror("错误", "继续训练的模型文件不存在或未选择！")
+        return
 
+    # 获取用户输入的参数，如果未输入则使用默认值
+    batch_size = int(batch_size_entry.get() or DEFAULT_BATCH_SIZE)
+    img_height = int(img_height_entry.get() or DEFAULT_IMG_HEIGHT)
+    img_width = int(img_width_entry.get() or DEFAULT_IMG_WIDTH)
+    validation_split = float(validation_split_scale.get() / 100.0)
+    learning_rate = float(learning_rate_entry.get() or 0.001)
+    epochs = int(epochs_entry.get() or 10)
+
+    # 数据加载和预处理
     train_ds = tf.keras.preprocessing.image_dataset_from_directory(
         data_dir,
-        validation_split=0.2,
+        validation_split=validation_split,
         subset="training",
         seed=123,
         image_size=(img_height, img_width),
@@ -75,7 +133,7 @@ def start_training():
 
     val_ds = tf.keras.preprocessing.image_dataset_from_directory(
         data_dir,
-        validation_split=0.2,
+        validation_split=validation_split,
         subset="validation",
         seed=123,
         image_size=(img_height, img_width),
@@ -99,123 +157,178 @@ def start_training():
         layers.RandomZoom(0.2),
     ])
 
-    # 根据是否使用预训练模型加载不同的架构
-    if use_pretrained:
-        # 创建基础模型并加载预训练权重
-        base_model = tf.keras.applications.ResNet101(
-            weights=None,  # 不加载ImageNet权重
-            include_top=False,  # 不加载顶部的全连接层
-            input_shape=(img_height, img_width, 3)
-        )
-        base_model.load_weights(pretrained_model_path)  # 加载用户指定的预训练权重
-        base_model.trainable = False  # 冻结预训练模型的层
-
-        # 构建模型
-        model = models.Sequential([
-            layers.InputLayer(input_shape=(img_height, img_width, 3)),  # 明确指定输入形状
-            data_augmentation,  # 数据增强
-            layers.Rescaling(1./255),  # Rescaling 层会自动推导输入形状
-            base_model,
-            layers.GlobalAveragePooling2D(),
-            layers.Dropout(0.3),
-            layers.Dense(128, activation='relu'),
-            layers.Dense(num_classes, activation='softmax')
-        ])
+    # 如果继续训练，加载已有模型
+    if continue_training:
+        model = tf.keras.models.load_model(model_to_continue)
     else:
-        # 使用较简单的CNN架构
-        model = models.Sequential([
-            layers.InputLayer(input_shape=(img_height, img_width, 3)),  # 明确指定输入形状
-            data_augmentation,  # 数据增强
-            layers.Rescaling(1./255),  # Rescaling 层会自动推导输入形状
-            layers.Conv2D(32, (3, 3), activation='relu', padding='same'),
-            layers.MaxPooling2D((2, 2)),
-            layers.Dropout(0.3),
-            layers.Conv2D(64, (3, 3), activation='relu', padding='same'),
-            layers.MaxPooling2D((2, 2)),
-            layers.Dropout(0.3),
-            layers.GlobalAveragePooling2D(),
-            layers.Dense(128, activation='relu'),
-            layers.Dense(num_classes, activation='softmax')
-        ])
+        # 根据是否使用预训练模型加载不同的架构
+        if use_pretrained:
+            # 创建基础模型并加载预训练权重
+            base_model = tf.keras.applications.ResNet101(
+                weights=None,  # 不加载ImageNet权重
+                include_top=False,  # 不加载顶部的全连接层
+                input_shape=(img_height, img_width, 3)
+            )
+            base_model.load_weights(pretrained_model_path)  # 加载用户指定的预训练权重
+            base_model.trainable = False  # 冻结预训练模型的层
+
+            # 构建模型
+            model = models.Sequential([
+                layers.InputLayer(input_shape=(img_height, img_width, 3)),  # 明确指定输入形状
+                data_augmentation,  # 数据增强
+                layers.Rescaling(1./255),  # Rescaling 层会自动推导输入形状
+                base_model,
+                layers.GlobalAveragePooling2D(),
+                layers.Dropout(0.3),
+                layers.Dense(128, activation='relu'),
+                layers.Dense(num_classes, activation='softmax')
+            ])
+        else:
+            # 使用较简单的CNN架构
+            model = models.Sequential([
+                layers.InputLayer(input_shape=(img_height, img_width, 3)),  # 明确指定输入形状
+                data_augmentation,  # 数据增强
+                layers.Rescaling(1./255),  # Rescaling 层会自动推导输入形状
+                layers.Conv2D(32, (3, 3), activation='relu', padding='same'),
+                layers.MaxPooling2D((2, 2)),
+                layers.Dropout(0.3),
+                layers.Conv2D(64, (3, 3), activation='relu', padding='same'),
+                layers.MaxPooling2D((2, 2)),
+                layers.Dropout(0.3),
+                layers.GlobalAveragePooling2D(),
+                layers.Dense(128, activation='relu'),
+                layers.Dense(num_classes, activation='softmax')
+            ])
 
     model.summary()
 
     # 编译模型
-    learning_rate = float(learning_rate_entry.get() or 0.001)
     opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
     model.compile(optimizer=opt, loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False), metrics=['accuracy'])
 
     # 训练模型
-    epochs = int(epochs_entry.get() or 10)
-    history = model.fit(train_ds, validation_data=val_ds, epochs=epochs)
+    with stop_training_lock:
+        stop_training = False
+    stop_button.config(state="normal")  # 启用停止按钮
 
-    # 保存模型和类别名称
-    save_model = messagebox.askyesno("保存模型", "是否保存模型？")
-    if save_model:
-        model_save_path = filedialog.asksaveasfilename(
-            title="保存模型",
-            defaultextension=".keras",
-            filetypes=[("H5 文件", "*.h5"), ("Keras 文件", "*.keras")]
+    callbacks = [
+        tf.keras.callbacks.LambdaCallback(on_epoch_end=lambda epoch, logs: update_training_status(epoch, logs)),
+        StopTrainingCallback(stop_training)
+    ]
+
+    try:
+        history = model.fit(
+            train_ds,
+            validation_data=val_ds,
+            epochs=epochs,
+            callbacks=callbacks
         )
-        if model_save_path:
+    except Exception as e:
+        print(f"训练异常: {e}")
+
+    # 如果训练被停止，提示用户是否保存模型
+    with stop_training_lock:
+        if stop_training:
+            save_model = messagebox.askyesno("保存模型", "训练已停止，是否保存模型？")
+        else:
+            save_model = messagebox.askyesno("保存模型", "训练完成，是否保存模型？")
+
+    if save_model:
+        # 弹出文件夹命名对话框
+        folder_name = filedialog.asksaveasfilename(
+            title="保存模型文件夹",
+            defaultextension="",
+            filetypes=[("文件夹", "*")]  # 允许用户输入文件夹名称
+        )
+        if folder_name:
+            # 创建文件夹
+            os.makedirs(folder_name, exist_ok=True)
+
+            # 保存模型文件
+            model_save_path = os.path.join(folder_name, "model.keras")
             model.save(model_save_path)
-            messagebox.showinfo("成功", f"模型已保存到: {model_save_path}")
 
-            # 保存类别名称
-            class_names_path = filedialog.asksaveasfilename(
-                title="保存类别名称",
-                defaultextension=".json",
-                filetypes=[("JSON 文件", "*.json")]
-            )
-            if class_names_path:
-                with open(class_names_path, 'w', encoding='utf-8') as f:
-                    json.dump(class_names, f)
-                messagebox.showinfo("成功", f"类别名称已保存到: {class_names_path}")
+            # 保存类别名称文件
+            class_names_path = os.path.join(folder_name, "class_names.json")
+            with open(class_names_path, 'w', encoding='utf-8') as f:
+                json.dump(class_names, f)
 
-    # 绘制训练过程中的准确率和损失变化
-    acc = history.history['accuracy']
-    val_acc = history.history['val_accuracy']
-    loss = history.history['loss']
-    val_loss = history.history['val_loss']
-    epochs_range = range(epochs)
-
-    plt.figure(figsize=(12, 4))
-    plt.subplot(1, 2, 1)
-    plt.plot(epochs_range, acc, label='Training Accuracy')
-    plt.plot(epochs_range, val_acc, label='Validation Accuracy')
-    plt.legend(loc='lower right')
-    plt.title('Training and Validation Accuracy')
-
-    plt.subplot(1, 2, 2)
-    plt.plot(epochs_range, loss, label='Training Loss')
-    plt.plot(epochs_range, val_loss, label='Validation Loss')
-    plt.legend(loc='upper right')
-    plt.title('Training and Validation Loss')
-    plt.show()
+            messagebox.showinfo("成功", f"模型和类别名称已保存到: {folder_name}")
 
     messagebox.showinfo("完成", "训练完成！")
 
+# 开始训练（启动多线程）
+def start_training():
+    training_thread = threading.Thread(target=train_task)
+    training_thread.start()
+
 # GUI 布局
-Label(root, text="数据集文件夹:").grid(row=0, column=0, padx=10, pady=10)
-data_dir_label = Label(root, text="未选择", fg="red")
+frame = Frame(root)
+frame.pack(padx=10, pady=10)
+
+Label(frame, text="数据集文件夹:").grid(row=0, column=0, padx=10, pady=10)
+data_dir_label = Label(frame, text="未选择", fg="red")
 data_dir_label.grid(row=0, column=1, padx=10, pady=10)
-Button(root, text="选择文件夹", command=select_data_dir).grid(row=0, column=2, padx=10, pady=10)
+Button(frame, text="选择文件夹", command=select_data_dir).grid(row=0, column=2, padx=10, pady=10)
 
 use_pretrained_var = BooleanVar()
-Checkbutton(root, text="使用预训练模型", variable=use_pretrained_var).grid(row=1, column=0, padx=10, pady=10)
-pretrained_model_label = Label(root, text="未选择", fg="red")
+Checkbutton(frame, text="使用预训练模型", variable=use_pretrained_var).grid(row=1, column=0, padx=10, pady=10)
+pretrained_model_label = Label(frame, text="未选择", fg="red")
 pretrained_model_label.grid(row=1, column=1, padx=10, pady=10)
-Button(root, text="选择模型文件", command=select_pretrained_model).grid(row=1, column=2, padx=10, pady=10)
+Button(frame, text="选择模型文件", command=select_pretrained_model).grid(row=1, column=2, padx=10, pady=10)
 
-Label(root, text="学习率:").grid(row=2, column=0, padx=10, pady=10)
-learning_rate_entry = Entry(root)
-learning_rate_entry.grid(row=2, column=1, padx=10, pady=10)
+continue_training_var = BooleanVar()
+Checkbutton(frame, text="继续训练已有模型", variable=continue_training_var).grid(row=2, column=0, padx=10, pady=10)
+continue_model_label = Label(frame, text="未选择", fg="red")
+continue_model_label.grid(row=2, column=1, padx=10, pady=10)
+Button(frame, text="选择模型文件", command=select_model_to_continue).grid(row=2, column=2, padx=10, pady=10)
 
-Label(root, text="训练轮数:").grid(row=3, column=0, padx=10, pady=10)
-epochs_entry = Entry(root)
-epochs_entry.grid(row=3, column=1, padx=10, pady=10)
+Label(frame, text="批量大小:").grid(row=3, column=0, padx=10, pady=10)
+batch_size_entry = Entry(frame)
+batch_size_entry.insert(0, str(DEFAULT_BATCH_SIZE))  # 设置默认值
+batch_size_entry.grid(row=3, column=1, padx=10, pady=10)
 
-Button(root, text="开始训练", command=start_training).grid(row=4, column=1, padx=10, pady=20)
+Label(frame, text="图像高度:").grid(row=4, column=0, padx=10, pady=10)
+img_height_entry = Entry(frame)
+img_height_entry.insert(0, str(DEFAULT_IMG_HEIGHT))  # 设置默认值
+img_height_entry.grid(row=4, column=1, padx=10, pady=10)
+
+Label(frame, text="图像宽度:").grid(row=5, column=0, padx=10, pady=10)
+img_width_entry = Entry(frame)
+img_width_entry.insert(0, str(DEFAULT_IMG_WIDTH))  # 设置默认值
+img_width_entry.grid(row=5, column=1, padx=10, pady=10)
+
+Label(frame, text="验证集比例 (%):").grid(row=6, column=0, padx=10, pady=10)
+validation_split_scale = Scale(frame, from_=0, to=100, orient="horizontal")
+validation_split_scale.set(20)  # 默认值为20%
+validation_split_scale.grid(row=6, column=1, padx=10, pady=10)
+
+Label(frame, text="学习率:").grid(row=7, column=0, padx=10, pady=10)
+learning_rate_entry = Entry(frame)
+learning_rate_entry.insert(0, "0.001")  # 设置默认值
+learning_rate_entry.grid(row=7, column=1, padx=10, pady=10)
+
+Label(frame, text="训练轮数:").grid(row=8, column=0, padx=10, pady=10)
+epochs_entry = Entry(frame)
+epochs_entry.insert(0, "10")  # 设置默认值
+epochs_entry.grid(row=8, column=1, padx=10, pady=10)
+
+# 训练状态显示
+current_epoch_label = Label(frame, text="当前轮数: 0")
+current_epoch_label.grid(row=9, column=0, padx=10, pady=10)
+train_loss_label = Label(frame, text="训练损失: 0.0000")
+train_loss_label.grid(row=9, column=1, padx=10, pady=10)
+train_acc_label = Label(frame, text="训练准确率: 0.0000")
+train_acc_label.grid(row=9, column=2, padx=10, pady=10)
+val_loss_label = Label(frame, text="验证损失: 0.0000")
+val_loss_label.grid(row=10, column=0, padx=10, pady=10)
+val_acc_label = Label(frame, text="验证准确率: 0.0000")
+val_acc_label.grid(row=10, column=1, padx=10, pady=10)
+
+# 开始训练和停止训练按钮
+Button(frame, text="开始训练", command=start_training).grid(row=11, column=1, padx=10, pady=20)
+stop_button = Button(frame, text="停止训练", command=stop_training_callback, state="disabled")
+stop_button.grid(row=11, column=2, padx=10, pady=20)
 
 # 运行主循环
 root.mainloop()
