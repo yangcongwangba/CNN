@@ -1,34 +1,71 @@
 import os
 import json
 import tensorflow as tf
-from tensorflow.keras import layers, models
+from tensorflow.keras import layers, models, applications
 import pathlib
-from tkinter import Tk, Button, Label, Entry, filedialog, messagebox, Checkbutton, BooleanVar, Scale, Frame
+from tkinter import Tk, Button, Label, Entry, filedialog, messagebox, Checkbutton, BooleanVar, Scale, Frame, ttk
 import threading
-from threading import Lock, Event
+from threading import Event
 
-# 配置GPU
+# 配置 GPU
 gpus = tf.config.list_physical_devices("GPU")
 if gpus:
-    gpu0 = gpus[0]  # 如果有多个GPU，仅使用第0个GPU
-    tf.config.experimental.set_memory_growth(gpu0, True)  # 设置GPU显存按需分配
+    gpu0 = gpus[0]
+    tf.config.experimental.set_memory_growth(gpu0, True)
     tf.config.set_visible_devices([gpu0], "GPU")
 
 # 创建主窗口
 root = Tk()
 root.title("图像分类模型训练")
-root.geometry("600x600")
+root.geometry("700x700")
 
 # 全局变量
 data_dir = None
 continue_training = False
 model_to_continue = None
-stop_training_event = Event()  # 用于控制是否停止训练
+stop_training_event = Event()
+use_pretrained_model = BooleanVar(value=False)  # 是否使用预训练模型
 
 # 默认值
 DEFAULT_BATCH_SIZE = 32
 DEFAULT_IMG_HEIGHT = 180
 DEFAULT_IMG_WIDTH = 180
+
+# 支持的预训练模型及其介绍
+PRETRAINED_MODELS = {
+    "MobileNetV2": {
+        "class": applications.MobileNetV2,
+        "description": "轻量级模型，适合移动设备和嵌入式设备。"
+    },
+    "ResNet50": {
+        "class": applications.ResNet50,
+        "description": "经典的深度残差网络，适合图像分类任务。"
+    },
+    "InceptionV3": {
+        "class": applications.InceptionV3,
+        "description": "使用 Inception 模块的深度网络，适合大规模图像分类。"
+    },
+    "VGG16": {
+        "class": applications.VGG16,
+        "description": "经典的卷积神经网络，结构简单但参数量较大。"
+    },
+    "EfficientNetB0": {
+        "class": applications.EfficientNetB0,
+        "description": "高效的卷积神经网络，性能优越。"
+    },
+    "DenseNet121": {
+        "class": applications.DenseNet121,
+        "description": "密集连接的网络，适合小数据集。"
+    },
+    "NASNetMobile": {
+        "class": applications.NASNetMobile,
+        "description": "基于神经架构搜索的网络，性能优越。"
+    },
+    "Xception": {
+        "class": applications.Xception,
+        "description": "基于深度可分离卷积的网络，适合图像分类。"
+    }
+}
 
 # 选择数据集文件夹
 def select_data_dir():
@@ -54,41 +91,85 @@ def select_model_to_continue():
 
 # 停止训练
 def stop_training_callback():
-    stop_training_event.set()  # 设置停止事件
-    stop_button.config(state="disabled")  # 禁用停止按钮
-    start_button.config(state="normal")  # 启用开始训练按钮
+    stop_training_event.set()
+    stop_button.config(state="disabled")
+    start_button.config(state="normal")
     messagebox.showinfo("提示", "训练将在当前轮次完成后停止...")
 
-# 更新训练参数显示
+# 更新训练状态
 def update_training_status(epoch, logs):
     current_epoch_label.config(text=f"当前轮数: {epoch + 1}")
     train_loss_label.config(text=f"训练损失: {logs['loss']:.4f}")
     train_acc_label.config(text=f"训练准确率: {logs['accuracy']:.4f}")
     val_loss_label.config(text=f"验证损失: {logs['val_loss']:.4f}")
     val_acc_label.config(text=f"验证准确率: {logs['val_accuracy']:.4f}")
-    root.update_idletasks()  # 更新界面
+    root.update_idletasks()
 
 # 自定义回调以支持停止训练
 class StopTrainingCallback(tf.keras.callbacks.Callback):
     def on_epoch_end(self, epoch, logs=None):
-        if stop_training_event.is_set():  # 检查停止事件
+        if stop_training_event.is_set():
             print("训练停止")
             self.model.stop_training = True
+
+# 创建模型（支持预训练模型）
+def create_model(img_height, img_width, num_classes, use_pretrained=False, model_name="MobileNetV2"):
+    if use_pretrained:
+        # 获取用户选择的预训练模型
+        model_info = PRETRAINED_MODELS.get(model_name, PRETRAINED_MODELS["MobileNetV2"])
+        base_model = model_info["class"](
+            input_shape=(img_height, img_width, 3),
+            include_top=False,
+            weights='imagenet'
+        )
+        base_model.trainable = False
+        model = models.Sequential([
+            base_model,
+            layers.GlobalAveragePooling2D(),
+            layers.Dropout(0.5),
+            layers.Dense(num_classes, activation='softmax')
+        ])
+    else:
+        model = models.Sequential([
+            layers.InputLayer(input_shape=(img_height, img_width, 3)),
+            layers.Rescaling(1./255),
+            layers.Conv2D(16, (3, 3), activation='relu', padding='same', kernel_regularizer=tf.keras.regularizers.l2(0.001)),
+            layers.MaxPooling2D((2, 2)),
+            layers.Dropout(0.5),
+            layers.Conv2D(32, (3, 3), activation='relu', padding='same', kernel_regularizer=tf.keras.regularizers.l2(0.001)),
+            layers.MaxPooling2D((2, 2)),
+            layers.Dropout(0.5),
+            layers.Flatten(),
+            layers.Dense(64, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001)),
+            layers.Dropout(0.5),
+            layers.Dense(num_classes, activation='softmax')
+        ])
+    return model
+
+# 数据增强
+def create_data_augmentation():
+    data_augmentation = tf.keras.Sequential([
+        layers.RandomFlip("horizontal_and_vertical"),
+        layers.RandomRotation(0.2),
+        layers.RandomZoom(0.2),
+    ])
+    return data_augmentation
 
 # 训练任务
 def train_task():
     global data_dir, continue_training, model_to_continue
-
     if not data_dir or not data_dir.exists():
         messagebox.showerror("错误", "数据集文件夹不存在或未选择！")
         return
-
     continue_training = continue_training_var.get()
     if continue_training and (not model_to_continue or not os.path.exists(model_to_continue)):
         messagebox.showerror("错误", "继续训练的模型文件不存在或未选择！")
         return
 
-    # 获取用户输入的参数，如果未输入则使用默认值
+    # 获取用户选择的预训练模型名称
+    model_name = model_combobox.get()
+
+    # 其他代码保持不变
     batch_size = int(batch_size_entry.get() or DEFAULT_BATCH_SIZE)
     img_height = int(img_height_entry.get() or DEFAULT_IMG_HEIGHT)
     img_width = int(img_width_entry.get() or DEFAULT_IMG_WIDTH)
@@ -120,40 +201,47 @@ def train_task():
     num_classes = len(class_names)
     print(f"数据集类别: {class_names}")
 
+    # 将整数标签转换为 one-hot 编码
+    def one_hot_encode(image, label):
+        return image, tf.one_hot(label, depth=num_classes)
+
+    # 应用 one-hot 编码
+    train_ds = train_ds.map(one_hot_encode)
+    val_ds = val_ds.map(one_hot_encode)
+
+    # 数据增强
+    data_augmentation = create_data_augmentation()
+    train_ds = train_ds.map(lambda x, y: (data_augmentation(x, training=True), y))
+
     # 数据预处理：缓存、打乱、预取数据
     AUTOTUNE = tf.data.AUTOTUNE
     train_ds = train_ds.cache().shuffle(1000).prefetch(buffer_size=AUTOTUNE)
     val_ds = val_ds.cache().prefetch(buffer_size=AUTOTUNE)
 
-    # 如果继续训练，加载已有模型
+    # 创建模型
     if continue_training:
         model = tf.keras.models.load_model(model_to_continue)
     else:
-        # 使用最简单的CNN架构
-        model = models.Sequential([
-            layers.InputLayer(input_shape=(img_height, img_width, 3)),  # 明确指定输入形状
-            layers.Rescaling(1./255),  # 归一化
-            layers.Conv2D(16, (3, 3), activation='relu', padding='same'),  # 卷积层
-            layers.MaxPooling2D((2, 2)),  # 池化层
-            layers.Flatten(),  # 展平层
-            layers.Dense(64, activation='relu'),  # 全连接层
-            layers.Dense(num_classes, activation='softmax')  # 输出层
-        ])
+        model = create_model(img_height, img_width, num_classes, use_pretrained_model.get(), model_name)
 
     model.summary()
 
     # 编译模型
     opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
-    model.compile(optimizer=opt, loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False), metrics=['accuracy'])
+    model.compile(
+        optimizer=opt,
+        loss='categorical_crossentropy',  # 使用 categorical_crossentropy
+        metrics=['accuracy']
+    )
 
     # 训练模型
-    stop_button.config(state="normal")  # 启用停止按钮
-    start_button.config(state="disabled")  # 禁用开始按钮
+    stop_button.config(state="normal")
+    start_button.config(state="disabled")
 
     callbacks = [
         tf.keras.callbacks.LambdaCallback(on_epoch_end=update_training_status),
-        StopTrainingCallback(),  # 使用自定义回调来停止训练
-        tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)  # 早停法
+        StopTrainingCallback(),
+        tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
     ]
     history = model.fit(
         train_ds,
@@ -162,18 +250,25 @@ def train_task():
         callbacks=callbacks
     )
 
-    # 训练结束后，询问是否保存模型
-    if stop_training_event.is_set() or history.epoch[-1] == epochs - 1:
-        save_model = messagebox.askyesno("保存模型", "训练已停止，是否保存模型？")
-        if save_model:
-            folder_name = filedialog.asksaveasfilename(title="保存模型文件夹", defaultextension="", filetypes=[("文件夹", "*")])
-            if folder_name:
-                os.makedirs(folder_name, exist_ok=True)
-                model_save_path = os.path.join(folder_name, "model.keras")
-                model.save(model_save_path)
-                with open(os.path.join(folder_name, "class_names.json"), 'w', encoding='utf-8') as f:
-                    json.dump(class_names, f)
-                messagebox.showinfo("成功", f"模型和类别名称已保存到: {folder_name}")
+    # 训练结束后，询问是否继续训练
+    continue_training_after = messagebox.askyesno("继续训练", "训练已完成，是否继续训练？")
+    if continue_training_after:
+        # 如果用户选择继续训练，直接返回
+        stop_button.config(state="disabled")
+        start_button.config(state="normal")
+        return
+
+    # 如果用户选择不继续训练，询问是否保存模型
+    save_model = messagebox.askyesno("保存模型", "是否保存模型？")
+    if save_model:
+        folder_name = filedialog.asksaveasfilename(title="保存模型文件夹", defaultextension="", filetypes=[("文件夹", "*")])
+        if folder_name:
+            os.makedirs(folder_name, exist_ok=True)
+            model_save_path = os.path.join(folder_name, "model.keras")
+            model.save(model_save_path)
+            with open(os.path.join(folder_name, "class_names.json"), 'w', encoding='utf-8') as f:
+                json.dump(class_names, f)
+            messagebox.showinfo("成功", f"模型和类别名称已保存到: {folder_name}")
 
     stop_button.config(state="disabled")
     start_button.config(state="normal")
@@ -181,9 +276,15 @@ def train_task():
 
 # 开始训练（启动多线程）
 def start_training():
-    stop_training_event.clear()  # 重置停止事件
+    stop_training_event.clear()
     training_thread = threading.Thread(target=train_task)
     training_thread.start()
+
+# 更新模型介绍
+def update_model_description(event):
+    selected_model = model_combobox.get()
+    model_description = PRETRAINED_MODELS.get(selected_model, {}).get("description", "无描述")
+    model_description_label.config(text=f"模型介绍: {model_description}")
 
 # GUI 布局
 frame = Frame(root)
@@ -200,53 +301,64 @@ continue_model_label = Label(frame, text="未选择", fg="red")
 continue_model_label.grid(row=1, column=1, padx=10, pady=10)
 Button(frame, text="选择模型文件", command=select_model_to_continue).grid(row=1, column=2, padx=10, pady=10)
 
-Label(frame, text="批量大小:").grid(row=2, column=0, padx=10, pady=10)
+Checkbutton(frame, text="使用预训练模型", variable=use_pretrained_model).grid(row=2, column=0, padx=10, pady=10)
+
+Label(frame, text="预训练模型:").grid(row=3, column=0, padx=10, pady=10)
+model_combobox = ttk.Combobox(frame, values=list(PRETRAINED_MODELS.keys()))
+model_combobox.grid(row=3, column=1, padx=10, pady=10)
+model_combobox.set("MobileNetV2")
+model_combobox.bind("<<ComboboxSelected>>", update_model_description)
+
+model_description_label = Label(frame, text="模型介绍: 轻量级模型，适合移动设备和嵌入式设备。", wraplength=400)
+model_description_label.grid(row=4, column=0, columnspan=3, padx=10, pady=10)
+
+Label(frame, text="批量大小:").grid(row=5, column=0, padx=10, pady=10)
 batch_size_entry = Entry(frame)
 batch_size_entry.insert(0, str(DEFAULT_BATCH_SIZE))
-batch_size_entry.grid(row=2, column=1, padx=10, pady=10)
+batch_size_entry.grid(row=5, column=1, padx=10, pady=10)
 
-Label(frame, text="图像高度:").grid(row=3, column=0, padx=10, pady=10)
+Label(frame, text="图像高度:").grid(row=6, column=0, padx=10, pady=10)
 img_height_entry = Entry(frame)
 img_height_entry.insert(0, str(DEFAULT_IMG_HEIGHT))
-img_height_entry.grid(row=3, column=1, padx=10, pady=10)
+img_height_entry.grid(row=6, column=1, padx=10, pady=10)
 
-Label(frame, text="图像宽度:").grid(row=4, column=0, padx=10, pady=10)
+Label(frame, text="图像宽度:").grid(row=7, column=0, padx=10, pady=10)
 img_width_entry = Entry(frame)
 img_width_entry.insert(0, str(DEFAULT_IMG_WIDTH))
-img_width_entry.grid(row=4, column=1, padx=10, pady=10)
+img_width_entry.grid(row=7, column=1, padx=10, pady=10)
 
-Label(frame, text="验证集比例 (%):").grid(row=5, column=0, padx=10, pady=10)
+Label(frame, text="验证集比例 (%):").grid(row=8, column=0, padx=10, pady=10)
 validation_split_scale = Scale(frame, from_=0, to=100, orient="horizontal")
 validation_split_scale.set(20)
-validation_split_scale.grid(row=5, column=1, padx=10, pady=10)
+validation_split_scale.grid(row=8, column=1, padx=10, pady=10)
 
-Label(frame, text="学习率:").grid(row=6, column=0, padx=10, pady=10)
+Label(frame, text="学习率:").grid(row=9, column=0, padx=10, pady=10)
 learning_rate_entry = Entry(frame)
 learning_rate_entry.insert(0, "0.001")
-learning_rate_entry.grid(row=6, column=1, padx=10, pady=10)
+learning_rate_entry.grid(row=9, column=1, padx=10, pady=10)
 
-Label(frame, text="训练轮数:").grid(row=7, column=0, padx=10, pady=10)
+Label(frame, text="训练轮数:").grid(row=10, column=0, padx=10, pady=10)
 epochs_entry = Entry(frame)
 epochs_entry.insert(0, "10")
-epochs_entry.grid(row=7, column=1, padx=10, pady=10)
+epochs_entry.grid(row=10, column=1, padx=10, pady=10)
 
 # 训练状态显示
 current_epoch_label = Label(frame, text="当前轮数: 0")
-current_epoch_label.grid(row=8, column=0, padx=10, pady=10)
+current_epoch_label.grid(row=11, column=0, padx=10, pady=10)
 train_loss_label = Label(frame, text="训练损失: 0.0000")
-train_loss_label.grid(row=8, column=1, padx=10, pady=10)
+train_loss_label.grid(row=11, column=1, padx=10, pady=10)
 train_acc_label = Label(frame, text="训练准确率: 0.0000")
-train_acc_label.grid(row=8, column=2, padx=10, pady=10)
+train_acc_label.grid(row=11, column=2, padx=10, pady=10)
 val_loss_label = Label(frame, text="验证损失: 0.0000")
-val_loss_label.grid(row=9, column=0, padx=10, pady=10)
+val_loss_label.grid(row=12, column=0, padx=10, pady=10)
 val_acc_label = Label(frame, text="验证准确率: 0.0000")
-val_acc_label.grid(row=9, column=1, padx=10, pady=10)
+val_acc_label.grid(row=12, column=1, padx=10, pady=10)
 
 # 开始训练和停止训练按钮
 start_button = Button(frame, text="开始训练", command=start_training)
-start_button.grid(row=10, column=1, padx=10, pady=20)
+start_button.grid(row=13, column=1, padx=10, pady=20)
 stop_button = Button(frame, text="停止训练", command=stop_training_callback, state="disabled")
-stop_button.grid(row=10, column=2, padx=10, pady=20)
+stop_button.grid(row=13, column=2, padx=10, pady=20)
 
 # 运行主循环
 root.mainloop()
