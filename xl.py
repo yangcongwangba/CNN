@@ -21,8 +21,6 @@ root.geometry("600x600")
 
 # 全局变量
 data_dir = None
-pretrained_model_path = None
-use_pretrained = False
 continue_training = False
 model_to_continue = None
 stop_training_event = Event()  # 用于控制是否停止训练
@@ -41,18 +39,6 @@ def select_data_dir():
         data_dir_label.config(text=f"数据集路径: {data_dir}")
     else:
         messagebox.showwarning("警告", "未选择数据集文件夹！")
-
-# 选择预训练模型文件
-def select_pretrained_model():
-    global pretrained_model_path
-    pretrained_model_path = filedialog.askopenfilename(
-        title="选择预训练模型文件",
-        filetypes=[("H5 文件", "*.h5"), ("Keras 文件", "*.keras")]
-    )
-    if pretrained_model_path:
-        pretrained_model_label.config(text=f"预训练模型路径: {pretrained_model_path}")
-    else:
-        messagebox.showwarning("警告", "未选择预训练模型文件！")
 
 # 选择继续训练的模型文件
 def select_model_to_continue():
@@ -91,15 +77,10 @@ class StopTrainingCallback(tf.keras.callbacks.Callback):
 
 # 训练任务
 def train_task():
-    global data_dir, pretrained_model_path, use_pretrained, continue_training, model_to_continue
+    global data_dir, continue_training, model_to_continue
 
     if not data_dir or not data_dir.exists():
         messagebox.showerror("错误", "数据集文件夹不存在或未选择！")
-        return
-
-    use_pretrained = use_pretrained_var.get()
-    if use_pretrained and (not pretrained_model_path or not os.path.exists(pretrained_model_path)):
-        messagebox.showerror("错误", "预训练模型文件不存在或未选择！")
         return
 
     continue_training = continue_training_var.get()
@@ -144,55 +125,20 @@ def train_task():
     train_ds = train_ds.cache().shuffle(1000).prefetch(buffer_size=AUTOTUNE)
     val_ds = val_ds.cache().prefetch(buffer_size=AUTOTUNE)
 
-    # 数据增强
-    data_augmentation = tf.keras.Sequential([
-        layers.RandomFlip('horizontal'),
-        layers.RandomRotation(0.2),
-        layers.RandomZoom(0.2),
-    ])
-
     # 如果继续训练，加载已有模型
     if continue_training:
         model = tf.keras.models.load_model(model_to_continue)
     else:
-        # 根据是否使用预训练模型加载不同的架构
-        if use_pretrained:
-            # 创建基础模型并加载预训练权重
-            base_model = tf.keras.applications.ResNet101(
-                weights=None,  # 不加载ImageNet权重
-                include_top=False,  # 不加载顶部的全连接层
-                input_shape=(img_height, img_width, 3)
-            )
-            base_model.load_weights(pretrained_model_path)  # 加载用户指定的预训练权重
-            base_model.trainable = False  # 冻结预训练模型的层
-
-            # 构建模型
-            model = models.Sequential([
-                layers.InputLayer(input_shape=(img_height, img_width, 3)),  # 明确指定输入形状
-                data_augmentation,  # 数据增强
-                layers.Rescaling(1./255),  # Rescaling 层会自动推导输入形状
-                base_model,
-                layers.GlobalAveragePooling2D(),
-                layers.Dropout(0.3),
-                layers.Dense(128, activation='relu'),
-                layers.Dense(num_classes, activation='softmax')
-            ])
-        else:
-            # 使用较简单的CNN架构
-            model = models.Sequential([
-                layers.InputLayer(input_shape=(img_height, img_width, 3)),  # 明确指定输入形状
-                data_augmentation,  # 数据增强
-                layers.Rescaling(1./255),  # Rescaling 层会自动推导输入形状
-                layers.Conv2D(32, (3, 3), activation='relu', padding='same'),
-                layers.MaxPooling2D((2, 2)),
-                layers.Dropout(0.3),
-                layers.Conv2D(64, (3, 3), activation='relu', padding='same'),
-                layers.MaxPooling2D((2, 2)),
-                layers.Dropout(0.3),
-                layers.GlobalAveragePooling2D(),
-                layers.Dense(128, activation='relu'),
-                layers.Dense(num_classes, activation='softmax')
-            ])
+        # 使用最简单的CNN架构
+        model = models.Sequential([
+            layers.InputLayer(input_shape=(img_height, img_width, 3)),  # 明确指定输入形状
+            layers.Rescaling(1./255),  # 归一化
+            layers.Conv2D(16, (3, 3), activation='relu', padding='same'),  # 卷积层
+            layers.MaxPooling2D((2, 2)),  # 池化层
+            layers.Flatten(),  # 展平层
+            layers.Dense(64, activation='relu'),  # 全连接层
+            layers.Dense(num_classes, activation='softmax')  # 输出层
+        ])
 
     model.summary()
 
@@ -206,7 +152,8 @@ def train_task():
 
     callbacks = [
         tf.keras.callbacks.LambdaCallback(on_epoch_end=update_training_status),
-        StopTrainingCallback()  # 使用自定义回调来停止训练
+        StopTrainingCallback(),  # 使用自定义回调来停止训练
+        tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)  # 早停法
     ]
     history = model.fit(
         train_ds,
@@ -216,7 +163,7 @@ def train_task():
     )
 
     # 训练结束后，询问是否保存模型
-    if stop_training_event.is_set() or history.history['accuracy'][-1] >= 0.99:
+    if stop_training_event.is_set() or history.epoch[-1] == epochs - 1:
         save_model = messagebox.askyesno("保存模型", "训练已停止，是否保存模型？")
         if save_model:
             folder_name = filedialog.asksaveasfilename(title="保存模型文件夹", defaultextension="", filetypes=[("文件夹", "*")])
@@ -247,65 +194,59 @@ data_dir_label = Label(frame, text="未选择", fg="red")
 data_dir_label.grid(row=0, column=1, padx=10, pady=10)
 Button(frame, text="选择文件夹", command=select_data_dir).grid(row=0, column=2, padx=10, pady=10)
 
-use_pretrained_var = BooleanVar()
-Checkbutton(frame, text="使用预训练模型", variable=use_pretrained_var).grid(row=1, column=0, padx=10, pady=10)
-pretrained_model_label = Label(frame, text="未选择", fg="red")
-pretrained_model_label.grid(row=1, column=1, padx=10, pady=10)
-Button(frame, text="选择模型文件", command=select_pretrained_model).grid(row=1, column=2, padx=10, pady=10)
-
 continue_training_var = BooleanVar()
-Checkbutton(frame, text="继续训练已有模型", variable=continue_training_var).grid(row=2, column=0, padx=10, pady=10)
+Checkbutton(frame, text="继续训练已有模型", variable=continue_training_var).grid(row=1, column=0, padx=10, pady=10)
 continue_model_label = Label(frame, text="未选择", fg="red")
-continue_model_label.grid(row=2, column=1, padx=10, pady=10)
-Button(frame, text="选择模型文件", command=select_model_to_continue).grid(row=2, column=2, padx=10, pady=10)
+continue_model_label.grid(row=1, column=1, padx=10, pady=10)
+Button(frame, text="选择模型文件", command=select_model_to_continue).grid(row=1, column=2, padx=10, pady=10)
 
-Label(frame, text="批量大小:").grid(row=3, column=0, padx=10, pady=10)
+Label(frame, text="批量大小:").grid(row=2, column=0, padx=10, pady=10)
 batch_size_entry = Entry(frame)
 batch_size_entry.insert(0, str(DEFAULT_BATCH_SIZE))
-batch_size_entry.grid(row=3, column=1, padx=10, pady=10)
+batch_size_entry.grid(row=2, column=1, padx=10, pady=10)
 
-Label(frame, text="图像高度:").grid(row=4, column=0, padx=10, pady=10)
+Label(frame, text="图像高度:").grid(row=3, column=0, padx=10, pady=10)
 img_height_entry = Entry(frame)
 img_height_entry.insert(0, str(DEFAULT_IMG_HEIGHT))
-img_height_entry.grid(row=4, column=1, padx=10, pady=10)
+img_height_entry.grid(row=3, column=1, padx=10, pady=10)
 
-Label(frame, text="图像宽度:").grid(row=5, column=0, padx=10, pady=10)
+Label(frame, text="图像宽度:").grid(row=4, column=0, padx=10, pady=10)
 img_width_entry = Entry(frame)
 img_width_entry.insert(0, str(DEFAULT_IMG_WIDTH))
-img_width_entry.grid(row=5, column=1, padx=10, pady=10)
+img_width_entry.grid(row=4, column=1, padx=10, pady=10)
 
-Label(frame, text="验证集比例 (%):").grid(row=6, column=0, padx=10, pady=10)
+Label(frame, text="验证集比例 (%):").grid(row=5, column=0, padx=10, pady=10)
 validation_split_scale = Scale(frame, from_=0, to=100, orient="horizontal")
 validation_split_scale.set(20)
-validation_split_scale.grid(row=6, column=1, padx=10, pady=10)
+validation_split_scale.grid(row=5, column=1, padx=10, pady=10)
 
-Label(frame, text="学习率:").grid(row=7, column=0, padx=10, pady=10)
+Label(frame, text="学习率:").grid(row=6, column=0, padx=10, pady=10)
 learning_rate_entry = Entry(frame)
 learning_rate_entry.insert(0, "0.001")
-learning_rate_entry.grid(row=7, column=1, padx=10, pady=10)
+learning_rate_entry.grid(row=6, column=1, padx=10, pady=10)
 
-Label(frame, text="训练轮数:").grid(row=8, column=0, padx=10, pady=10)
+Label(frame, text="训练轮数:").grid(row=7, column=0, padx=10, pady=10)
 epochs_entry = Entry(frame)
 epochs_entry.insert(0, "10")
-epochs_entry.grid(row=8, column=1, padx=10, pady=10)
+epochs_entry.grid(row=7, column=1, padx=10, pady=10)
 
 # 训练状态显示
 current_epoch_label = Label(frame, text="当前轮数: 0")
-current_epoch_label.grid(row=9, column=0, padx=10, pady=10)
+current_epoch_label.grid(row=8, column=0, padx=10, pady=10)
 train_loss_label = Label(frame, text="训练损失: 0.0000")
-train_loss_label.grid(row=9, column=1, padx=10, pady=10)
+train_loss_label.grid(row=8, column=1, padx=10, pady=10)
 train_acc_label = Label(frame, text="训练准确率: 0.0000")
-train_acc_label.grid(row=9, column=2, padx=10, pady=10)
+train_acc_label.grid(row=8, column=2, padx=10, pady=10)
 val_loss_label = Label(frame, text="验证损失: 0.0000")
-val_loss_label.grid(row=10, column=0, padx=10, pady=10)
+val_loss_label.grid(row=9, column=0, padx=10, pady=10)
 val_acc_label = Label(frame, text="验证准确率: 0.0000")
-val_acc_label.grid(row=10, column=1, padx=10, pady=10)
+val_acc_label.grid(row=9, column=1, padx=10, pady=10)
 
 # 开始训练和停止训练按钮
 start_button = Button(frame, text="开始训练", command=start_training)
-start_button.grid(row=11, column=1, padx=10, pady=20)
+start_button.grid(row=10, column=1, padx=10, pady=20)
 stop_button = Button(frame, text="停止训练", command=stop_training_callback, state="disabled")
-stop_button.grid(row=11, column=2, padx=10, pady=20)
+stop_button.grid(row=10, column=2, padx=10, pady=20)
 
 # 运行主循环
 root.mainloop()
