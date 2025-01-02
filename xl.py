@@ -3,9 +3,11 @@ import json
 import tensorflow as tf
 from tensorflow.keras import layers, models, applications
 import pathlib
-from tkinter import Tk, Button, Label, Entry, filedialog, messagebox, Checkbutton, BooleanVar, Scale, Frame, ttk, Radiobutton
+from tkinter import Tk, Button, Label, Entry, filedialog, messagebox, Checkbutton, BooleanVar, Scale, Frame, ttk, Radiobutton, Toplevel
 import threading
 from threading import Event
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 # 配置 GPU
 gpus = tf.config.list_physical_devices("GPU")
@@ -178,6 +180,42 @@ def create_data_augmentation():
     ])
     return data_augmentation
 
+# 绘制训练历史图像
+def plot_training_history(history):
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+
+    # 绘制训练和验证的损失曲线
+    ax1.plot(history.history['loss'], label='Training Loss')
+    ax1.plot(history.history['val_loss'], label='Validation Loss')
+    ax1.set_title('Training and Validation Loss')
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel('Loss')
+    ax1.legend()
+
+    # 绘制训练和验证的准确率曲线
+    ax2.plot(history.history['accuracy'], label='Training Accuracy')
+    ax2.plot(history.history['val_accuracy'], label='Validation Accuracy')
+    ax2.set_title('Training and Validation Accuracy')
+    ax2.set_xlabel('Epoch')
+    ax2.set_ylabel('Accuracy')
+    ax2.legend()
+
+    plt.tight_layout()
+    return fig
+
+# 在弹窗中显示训练历史图像
+def show_training_history(history):
+    popup = Toplevel()
+    popup.title("训练历史")
+    popup.geometry("800x500")
+
+    fig = plot_training_history(history)
+    canvas = FigureCanvasTkAgg(fig, master=popup)
+    canvas.draw()
+    canvas.get_tk_widget().pack(fill="both", expand=True)
+
+    plt.close(fig)
+
 # 训练任务
 def train_task():
     global data_dir, train_dir, val_dir, continue_training, model_to_continue
@@ -215,7 +253,7 @@ def train_task():
             seed=123,
             image_size=(img_height, img_width),
             batch_size=batch_size,
-            label_mode = 'categorical' # 返回 one-hot 编码
+            label_mode='categorical'
         )
 
         val_ds = tf.keras.preprocessing.image_dataset_from_directory(
@@ -225,7 +263,7 @@ def train_task():
             seed=123,
             image_size=(img_height, img_width),
             batch_size=batch_size,
-            label_mode = 'categorical'
+            label_mode='categorical'
         )
     else:  # 手动上传数据集
         train_ds = tf.keras.preprocessing.image_dataset_from_directory(
@@ -233,7 +271,7 @@ def train_task():
             seed=123,
             image_size=(img_height, img_width),
             batch_size=batch_size,
-            label_mode = 'categorical'
+            label_mode='categorical'
         )
 
         val_ds = tf.keras.preprocessing.image_dataset_from_directory(
@@ -241,14 +279,13 @@ def train_task():
             seed=123,
             image_size=(img_height, img_width),
             batch_size=batch_size,
-            label_mode = 'categorical'
+            label_mode='categorical'
         )
+
     # 获取类别名称
     class_names = train_ds.class_names
     num_classes = len(class_names)
     print(f"数据集类别: {class_names}")
-
-
 
     # 数据增强
     data_augmentation = create_data_augmentation()
@@ -268,10 +305,10 @@ def train_task():
     model.summary()
 
     # 编译模型
-    opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)# 优化器
+    opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
     model.compile(
         optimizer=opt,
-        loss='categorical_crossentropy',  # 使用 categorical_crossentropy
+        loss='categorical_crossentropy',
         metrics=['accuracy']
     )
 
@@ -280,9 +317,8 @@ def train_task():
     start_button.config(state="disabled")
 
     callbacks = [
-        tf.keras.callbacks.LambdaCallback(on_epoch_end=update_training_status),#状态信息
-        StopTrainingCallback(),#检测停止
-        #早停 tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+        tf.keras.callbacks.LambdaCallback(on_epoch_end=update_training_status),
+        StopTrainingCallback(),
     ]
     history = model.fit(
         train_ds,
@@ -290,7 +326,6 @@ def train_task():
         validation_data=val_ds,
         callbacks=callbacks
     )
-
 
     # 询问是否保存模型
     save_model = messagebox.askyesno("保存模型", "是否保存模型？")
@@ -303,6 +338,9 @@ def train_task():
             with open(os.path.join(folder_name, "class_names.json"), 'w', encoding='utf-8') as f:
                 json.dump(class_names, f)
             messagebox.showinfo("成功", f"模型和类别名称已保存到: {folder_name}")
+
+    # 显示训练历史图像
+    show_training_history(history)
 
     # 训练结束后启用所有按钮
     data_dir_button.config(state="normal")
@@ -359,12 +397,12 @@ def toggle_dataset_selection():
         data_dir_button.config(state="normal")
         train_dir_button.config(state="disabled")
         val_dir_button.config(state="disabled")
-        validation_split_scale.config(state="normal")  # 启用验证集比例按钮
+        validation_split_scale.config(state="normal")
     else:  # 手动上传
         data_dir_button.config(state="disabled")
         train_dir_button.config(state="normal")
         val_dir_button.config(state="normal")
-        validation_split_scale.config(state="disabled")  # 禁用验证集比例按钮
+        validation_split_scale.config(state="disabled")
 
 # GUI 布局
 frame = Frame(root)
@@ -437,9 +475,6 @@ validation_split_scale = Scale(frame, from_=1, to=99, orient="horizontal")
 validation_split_scale.set(20)
 validation_split_scale.grid(row=11, column=1, padx=10, pady=10)
 
-
-
-
 Label(frame, text="学习率:").grid(row=12, column=0, padx=10, pady=10)
 learning_rate_entry = Entry(frame)
 learning_rate_entry.insert(0, "0.001")
@@ -467,7 +502,6 @@ start_button = Button(frame, text="开始训练", command=start_training)
 start_button.grid(row=16, column=1, padx=10, pady=20)
 stop_button = Button(frame, text="停止训练", command=stop_training_callback, state="disabled")
 stop_button.grid(row=16, column=2, padx=10, pady=20)
-
 
 # 运行主循环
 root.mainloop()
