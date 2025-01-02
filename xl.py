@@ -314,13 +314,46 @@ def train_task():
                 json.dump(class_names, f)
             messagebox.showinfo("成功", f"模型和类别名称已保存到: {folder_name}")
 
-    stop_button.config(state="disabled")
+    # 训练结束后启用所有按钮
+    data_dir_button.config(state="normal")
+    train_dir_button.config(state="normal")
+    val_dir_button.config(state="normal")
+    continue_model_button.config(state="normal")
+    batch_size_entry.config(state="normal")
+    img_height_entry.config(state="normal")
+    img_width_entry.config(state="normal")
+    validation_split_scale.config(state="normal")
+    learning_rate_entry.config(state="normal")
+    epochs_entry.config(state="normal")
+    model_combobox.config(state="normal")
+    use_pretrained_model_checkbutton.config(state="normal")
+    dataset_split_method_auto.config(state="normal")
+    dataset_split_method_manual.config(state="normal")
     start_button.config(state="normal")
+    stop_button.config(state="disabled")
     messagebox.showinfo("完成", "训练完成！")
 
 # 开始训练（启动多线程）
 def start_training():
     stop_training_event.clear()
+    # 禁用所有按钮
+    data_dir_button.config(state="disabled")
+    train_dir_button.config(state="disabled")
+    val_dir_button.config(state="disabled")
+    continue_model_button.config(state="disabled")
+    batch_size_entry.config(state="disabled")
+    img_height_entry.config(state="disabled")
+    img_width_entry.config(state="disabled")
+    validation_split_scale.config(state="disabled")
+    learning_rate_entry.config(state="disabled")
+    epochs_entry.config(state="disabled")
+    model_combobox.config(state="disabled")
+    use_pretrained_model_checkbutton.config(state="disabled")
+    dataset_split_method_auto.config(state="disabled")
+    dataset_split_method_manual.config(state="disabled")
+    start_button.config(state="disabled")
+    stop_button.config(state="normal")
+    # 启动训练线程
     training_thread = threading.Thread(target=train_task)
     training_thread.start()
 
@@ -336,10 +369,12 @@ def toggle_dataset_selection():
         data_dir_button.config(state="normal")
         train_dir_button.config(state="disabled")
         val_dir_button.config(state="disabled")
+        validation_split_scale.config(state="normal")  # 启用验证集比例按钮
     else:  # 手动上传
         data_dir_button.config(state="disabled")
         train_dir_button.config(state="normal")
         val_dir_button.config(state="normal")
+        validation_split_scale.config(state="disabled")  # 禁用验证集比例按钮
 
 # GUI 布局
 frame = Frame(root)
@@ -347,8 +382,10 @@ frame.pack(padx=10, pady=10)
 
 # 数据集划分方式选择
 Label(frame, text="数据集划分方式:").grid(row=0, column=0, padx=10, pady=10)
-Radiobutton(frame, text="自动划分训练集和验证集", variable=dataset_split_method, value=True, command=toggle_dataset_selection).grid(row=0, column=1, padx=10, pady=10)
-Radiobutton(frame, text="手动上传训练集和验证集", variable=dataset_split_method, value=False, command=toggle_dataset_selection).grid(row=0, column=2, padx=10, pady=10)
+dataset_split_method_auto = Radiobutton(frame, text="自动划分训练集和验证集", variable=dataset_split_method, value=True, command=toggle_dataset_selection)
+dataset_split_method_auto.grid(row=0, column=1, padx=10, pady=10)
+dataset_split_method_manual = Radiobutton(frame, text="手动上传训练集和验证集", variable=dataset_split_method, value=False, command=toggle_dataset_selection)
+dataset_split_method_manual.grid(row=0, column=2, padx=10, pady=10)
 
 # 自动划分数据集
 Label(frame, text="数据集文件夹:").grid(row=1, column=0, padx=10, pady=10)
@@ -374,9 +411,11 @@ continue_training_var = BooleanVar()
 Checkbutton(frame, text="继续训练已有模型", variable=continue_training_var).grid(row=4, column=0, padx=10, pady=10)
 continue_model_label = Label(frame, text="未选择", fg="red")
 continue_model_label.grid(row=4, column=1, padx=10, pady=10)
-Button(frame, text="选择模型文件", command=select_model_to_continue).grid(row=4, column=2, padx=10, pady=10)
+continue_model_button = Button(frame, text="选择模型文件", command=select_model_to_continue)
+continue_model_button.grid(row=4, column=2, padx=10, pady=10)
 
-Checkbutton(frame, text="使用预训练模型", variable=use_pretrained_model).grid(row=5, column=0, padx=10, pady=10)
+use_pretrained_model_checkbutton = Checkbutton(frame, text="使用预训练模型", variable=use_pretrained_model)
+use_pretrained_model_checkbutton.grid(row=5, column=0, padx=10, pady=10)
 
 Label(frame, text="预训练模型:").grid(row=6, column=0, padx=10, pady=10)
 model_combobox = ttk.Combobox(frame, values=list(PRETRAINED_MODELS.keys()))
