@@ -17,7 +17,7 @@ if gpus:
 # 创建主窗口
 root = Tk()
 root.title("图像分类模型训练")
-root.geometry("700x800")
+root.geometry("700x830")
 
 # 全局变量
 data_dir = None
@@ -198,7 +198,7 @@ def train_task():
     # 获取用户选择的预训练模型名称
     model_name = model_combobox.get()
 
-    # 其他代码保持不变
+    # 默认设置
     batch_size = int(batch_size_entry.get() or DEFAULT_BATCH_SIZE)
     img_height = int(img_height_entry.get() or DEFAULT_IMG_HEIGHT)
     img_width = int(img_width_entry.get() or DEFAULT_IMG_WIDTH)
@@ -214,7 +214,8 @@ def train_task():
             subset="training",
             seed=123,
             image_size=(img_height, img_width),
-            batch_size=batch_size
+            batch_size=batch_size,
+            label_mode = 'categorical' # 返回 one-hot 编码
         )
 
         val_ds = tf.keras.preprocessing.image_dataset_from_directory(
@@ -223,35 +224,31 @@ def train_task():
             subset="validation",
             seed=123,
             image_size=(img_height, img_width),
-            batch_size=batch_size
+            batch_size=batch_size,
+            label_mode = 'categorical'
         )
     else:  # 手动上传数据集
         train_ds = tf.keras.preprocessing.image_dataset_from_directory(
             train_dir,
             seed=123,
             image_size=(img_height, img_width),
-            batch_size=batch_size
+            batch_size=batch_size,
+            label_mode = 'categorical'
         )
 
         val_ds = tf.keras.preprocessing.image_dataset_from_directory(
             val_dir,
             seed=123,
             image_size=(img_height, img_width),
-            batch_size=batch_size
+            batch_size=batch_size,
+            label_mode = 'categorical'
         )
-
     # 获取类别名称
     class_names = train_ds.class_names
     num_classes = len(class_names)
     print(f"数据集类别: {class_names}")
 
-    # 将整数标签转换为 one-hot 编码
-    def one_hot_encode(image, label):
-        return image, tf.one_hot(label, depth=num_classes)
 
-    # 应用 one-hot 编码
-    train_ds = train_ds.map(one_hot_encode)
-    val_ds = val_ds.map(one_hot_encode)
 
     # 数据增强
     data_augmentation = create_data_augmentation()
@@ -271,7 +268,7 @@ def train_task():
     model.summary()
 
     # 编译模型
-    opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)#优化器
+    opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)# 优化器
     model.compile(
         optimizer=opt,
         loss='categorical_crossentropy',  # 使用 categorical_crossentropy
@@ -294,15 +291,8 @@ def train_task():
         callbacks=callbacks
     )
 
-    # 训练结束后，询问是否继续训练
-    continue_training_after = messagebox.askyesno("继续训练", "训练已完成，是否继续训练？")
-    if continue_training_after:
-        # 如果用户选择继续训练，直接返回
-        stop_button.config(state="disabled")
-        start_button.config(state="normal")
-        return
 
-    # 如果用户选择不继续训练，询问是否保存模型
+    # 询问是否保存模型
     save_model = messagebox.askyesno("保存模型", "是否保存模型？")
     if save_model:
         folder_name = filedialog.asksaveasfilename(title="保存模型文件夹", defaultextension="", filetypes=[("文件夹", "*")])
@@ -441,10 +431,14 @@ img_width_entry = Entry(frame)
 img_width_entry.insert(0, str(DEFAULT_IMG_WIDTH))
 img_width_entry.grid(row=10, column=1, padx=10, pady=10)
 
+# 验证集比例滑动条
 Label(frame, text="验证集比例 (%):").grid(row=11, column=0, padx=10, pady=10)
-validation_split_scale = Scale(frame, from_=0, to=100, orient="horizontal")
+validation_split_scale = Scale(frame, from_=1, to=99, orient="horizontal")
 validation_split_scale.set(20)
 validation_split_scale.grid(row=11, column=1, padx=10, pady=10)
+
+
+
 
 Label(frame, text="学习率:").grid(row=12, column=0, padx=10, pady=10)
 learning_rate_entry = Entry(frame)
@@ -473,6 +467,7 @@ start_button = Button(frame, text="开始训练", command=start_training)
 start_button.grid(row=16, column=1, padx=10, pady=20)
 stop_button = Button(frame, text="停止训练", command=stop_training_callback, state="disabled")
 stop_button.grid(row=16, column=2, padx=10, pady=20)
+
 
 # 运行主循环
 root.mainloop()
