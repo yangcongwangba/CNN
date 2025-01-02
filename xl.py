@@ -3,7 +3,7 @@ import json
 import tensorflow as tf
 from tensorflow.keras import layers, models, applications
 import pathlib
-from tkinter import Tk, Button, Label, Entry, filedialog, messagebox, Checkbutton, BooleanVar, Scale, Frame, ttk
+from tkinter import Tk, Button, Label, Entry, filedialog, messagebox, Checkbutton, BooleanVar, Scale, Frame, ttk, Radiobutton
 import threading
 from threading import Event
 
@@ -17,14 +17,17 @@ if gpus:
 # 创建主窗口
 root = Tk()
 root.title("图像分类模型训练")
-root.geometry("700x700")
+root.geometry("700x800")
 
 # 全局变量
 data_dir = None
+train_dir = None
+val_dir = None
 continue_training = False
 model_to_continue = None
 stop_training_event = Event()
 use_pretrained_model = BooleanVar(value=False)  # 是否使用预训练模型
+dataset_split_method = BooleanVar(value=True)  # True: 自动划分, False: 手动上传
 
 # 默认值
 DEFAULT_BATCH_SIZE = 32
@@ -76,6 +79,26 @@ def select_data_dir():
         data_dir_label.config(text=f"数据集路径: {data_dir}")
     else:
         messagebox.showwarning("警告", "未选择数据集文件夹！")
+
+# 选择训练集文件夹
+def select_train_dir():
+    global train_dir
+    train_dir = filedialog.askdirectory(title="选择训练集文件夹")
+    if train_dir:
+        train_dir = pathlib.Path(train_dir)
+        train_dir_label.config(text=f"训练集路径: {train_dir}")
+    else:
+        messagebox.showwarning("警告", "未选择训练集文件夹！")
+
+# 选择验证集文件夹
+def select_val_dir():
+    global val_dir
+    val_dir = filedialog.askdirectory(title="选择验证集文件夹")
+    if val_dir:
+        val_dir = pathlib.Path(val_dir)
+        val_dir_label.config(text=f"验证集路径: {val_dir}")
+    else:
+        messagebox.showwarning("警告", "未选择验证集文件夹！")
 
 # 选择继续训练的模型文件
 def select_model_to_continue():
@@ -157,10 +180,16 @@ def create_data_augmentation():
 
 # 训练任务
 def train_task():
-    global data_dir, continue_training, model_to_continue
-    if not data_dir or not data_dir.exists():
-        messagebox.showerror("错误", "数据集文件夹不存在或未选择！")
-        return
+    global data_dir, train_dir, val_dir, continue_training, model_to_continue
+    if dataset_split_method.get():  # 自动划分数据集
+        if not data_dir or not data_dir.exists():
+            messagebox.showerror("错误", "数据集文件夹不存在或未选择！")
+            return
+    else:  # 手动上传数据集
+        if not train_dir or not train_dir.exists() or not val_dir or not val_dir.exists():
+            messagebox.showerror("错误", "训练集或验证集文件夹不存在或未选择！")
+            return
+
     continue_training = continue_training_var.get()
     if continue_training and (not model_to_continue or not os.path.exists(model_to_continue)):
         messagebox.showerror("错误", "继续训练的模型文件不存在或未选择！")
@@ -178,23 +207,38 @@ def train_task():
     epochs = int(epochs_entry.get() or 10)
 
     # 数据加载和预处理
-    train_ds = tf.keras.preprocessing.image_dataset_from_directory(
-        data_dir,
-        validation_split=validation_split,
-        subset="training",
-        seed=123,
-        image_size=(img_height, img_width),
-        batch_size=batch_size
-    )
+    if dataset_split_method.get():  # 自动划分数据集
+        train_ds = tf.keras.preprocessing.image_dataset_from_directory(
+            data_dir,
+            validation_split=validation_split,
+            subset="training",
+            seed=123,
+            image_size=(img_height, img_width),
+            batch_size=batch_size
+        )
 
-    val_ds = tf.keras.preprocessing.image_dataset_from_directory(
-        data_dir,
-        validation_split=validation_split,
-        subset="validation",
-        seed=123,
-        image_size=(img_height, img_width),
-        batch_size=batch_size
-    )
+        val_ds = tf.keras.preprocessing.image_dataset_from_directory(
+            data_dir,
+            validation_split=validation_split,
+            subset="validation",
+            seed=123,
+            image_size=(img_height, img_width),
+            batch_size=batch_size
+        )
+    else:  # 手动上传数据集
+        train_ds = tf.keras.preprocessing.image_dataset_from_directory(
+            train_dir,
+            seed=123,
+            image_size=(img_height, img_width),
+            batch_size=batch_size
+        )
+
+        val_ds = tf.keras.preprocessing.image_dataset_from_directory(
+            val_dir,
+            seed=123,
+            image_size=(img_height, img_width),
+            batch_size=batch_size
+        )
 
     # 获取类别名称
     class_names = train_ds.class_names
@@ -227,7 +271,7 @@ def train_task():
     model.summary()
 
     # 编译模型
-    opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+    opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)#优化器
     model.compile(
         optimizer=opt,
         loss='categorical_crossentropy',  # 使用 categorical_crossentropy
@@ -239,9 +283,9 @@ def train_task():
     start_button.config(state="disabled")
 
     callbacks = [
-        tf.keras.callbacks.LambdaCallback(on_epoch_end=update_training_status),
-        StopTrainingCallback(),
-        tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+        tf.keras.callbacks.LambdaCallback(on_epoch_end=update_training_status),#状态信息
+        StopTrainingCallback(),#检测停止
+        #早停 tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
     ]
     history = model.fit(
         train_ds,
@@ -286,79 +330,110 @@ def update_model_description(event):
     model_description = PRETRAINED_MODELS.get(selected_model, {}).get("description", "无描述")
     model_description_label.config(text=f"模型介绍: {model_description}")
 
+# 动态禁用或启用文件夹选择按钮
+def toggle_dataset_selection():
+    if dataset_split_method.get():  # 自动划分
+        data_dir_button.config(state="normal")
+        train_dir_button.config(state="disabled")
+        val_dir_button.config(state="disabled")
+    else:  # 手动上传
+        data_dir_button.config(state="disabled")
+        train_dir_button.config(state="normal")
+        val_dir_button.config(state="normal")
+
 # GUI 布局
 frame = Frame(root)
 frame.pack(padx=10, pady=10)
 
-Label(frame, text="数据集文件夹:").grid(row=0, column=0, padx=10, pady=10)
+# 数据集划分方式选择
+Label(frame, text="数据集划分方式:").grid(row=0, column=0, padx=10, pady=10)
+Radiobutton(frame, text="自动划分训练集和验证集", variable=dataset_split_method, value=True, command=toggle_dataset_selection).grid(row=0, column=1, padx=10, pady=10)
+Radiobutton(frame, text="手动上传训练集和验证集", variable=dataset_split_method, value=False, command=toggle_dataset_selection).grid(row=0, column=2, padx=10, pady=10)
+
+# 自动划分数据集
+Label(frame, text="数据集文件夹:").grid(row=1, column=0, padx=10, pady=10)
 data_dir_label = Label(frame, text="未选择", fg="red")
-data_dir_label.grid(row=0, column=1, padx=10, pady=10)
-Button(frame, text="选择文件夹", command=select_data_dir).grid(row=0, column=2, padx=10, pady=10)
+data_dir_label.grid(row=1, column=1, padx=10, pady=10)
+data_dir_button = Button(frame, text="选择文件夹", command=select_data_dir)
+data_dir_button.grid(row=1, column=2, padx=10, pady=10)
+
+# 手动上传数据集
+Label(frame, text="训练集文件夹:").grid(row=2, column=0, padx=10, pady=10)
+train_dir_label = Label(frame, text="未选择", fg="red")
+train_dir_label.grid(row=2, column=1, padx=10, pady=10)
+train_dir_button = Button(frame, text="选择文件夹", command=select_train_dir, state="disabled")
+train_dir_button.grid(row=2, column=2, padx=10, pady=10)
+
+Label(frame, text="验证集文件夹:").grid(row=3, column=0, padx=10, pady=10)
+val_dir_label = Label(frame, text="未选择", fg="red")
+val_dir_label.grid(row=3, column=1, padx=10, pady=10)
+val_dir_button = Button(frame, text="选择文件夹", command=select_val_dir, state="disabled")
+val_dir_button.grid(row=3, column=2, padx=10, pady=10)
 
 continue_training_var = BooleanVar()
-Checkbutton(frame, text="继续训练已有模型", variable=continue_training_var).grid(row=1, column=0, padx=10, pady=10)
+Checkbutton(frame, text="继续训练已有模型", variable=continue_training_var).grid(row=4, column=0, padx=10, pady=10)
 continue_model_label = Label(frame, text="未选择", fg="red")
-continue_model_label.grid(row=1, column=1, padx=10, pady=10)
-Button(frame, text="选择模型文件", command=select_model_to_continue).grid(row=1, column=2, padx=10, pady=10)
+continue_model_label.grid(row=4, column=1, padx=10, pady=10)
+Button(frame, text="选择模型文件", command=select_model_to_continue).grid(row=4, column=2, padx=10, pady=10)
 
-Checkbutton(frame, text="使用预训练模型", variable=use_pretrained_model).grid(row=2, column=0, padx=10, pady=10)
+Checkbutton(frame, text="使用预训练模型", variable=use_pretrained_model).grid(row=5, column=0, padx=10, pady=10)
 
-Label(frame, text="预训练模型:").grid(row=3, column=0, padx=10, pady=10)
+Label(frame, text="预训练模型:").grid(row=6, column=0, padx=10, pady=10)
 model_combobox = ttk.Combobox(frame, values=list(PRETRAINED_MODELS.keys()))
-model_combobox.grid(row=3, column=1, padx=10, pady=10)
+model_combobox.grid(row=6, column=1, padx=10, pady=10)
 model_combobox.set("MobileNetV2")
 model_combobox.bind("<<ComboboxSelected>>", update_model_description)
 
 model_description_label = Label(frame, text="模型介绍: 轻量级模型，适合移动设备和嵌入式设备。", wraplength=400)
-model_description_label.grid(row=4, column=0, columnspan=3, padx=10, pady=10)
+model_description_label.grid(row=7, column=0, columnspan=3, padx=10, pady=10)
 
-Label(frame, text="批量大小:").grid(row=5, column=0, padx=10, pady=10)
+Label(frame, text="批量大小:").grid(row=8, column=0, padx=10, pady=10)
 batch_size_entry = Entry(frame)
 batch_size_entry.insert(0, str(DEFAULT_BATCH_SIZE))
-batch_size_entry.grid(row=5, column=1, padx=10, pady=10)
+batch_size_entry.grid(row=8, column=1, padx=10, pady=10)
 
-Label(frame, text="图像高度:").grid(row=6, column=0, padx=10, pady=10)
+Label(frame, text="图像高度:").grid(row=9, column=0, padx=10, pady=10)
 img_height_entry = Entry(frame)
 img_height_entry.insert(0, str(DEFAULT_IMG_HEIGHT))
-img_height_entry.grid(row=6, column=1, padx=10, pady=10)
+img_height_entry.grid(row=9, column=1, padx=10, pady=10)
 
-Label(frame, text="图像宽度:").grid(row=7, column=0, padx=10, pady=10)
+Label(frame, text="图像宽度:").grid(row=10, column=0, padx=10, pady=10)
 img_width_entry = Entry(frame)
 img_width_entry.insert(0, str(DEFAULT_IMG_WIDTH))
-img_width_entry.grid(row=7, column=1, padx=10, pady=10)
+img_width_entry.grid(row=10, column=1, padx=10, pady=10)
 
-Label(frame, text="验证集比例 (%):").grid(row=8, column=0, padx=10, pady=10)
+Label(frame, text="验证集比例 (%):").grid(row=11, column=0, padx=10, pady=10)
 validation_split_scale = Scale(frame, from_=0, to=100, orient="horizontal")
 validation_split_scale.set(20)
-validation_split_scale.grid(row=8, column=1, padx=10, pady=10)
+validation_split_scale.grid(row=11, column=1, padx=10, pady=10)
 
-Label(frame, text="学习率:").grid(row=9, column=0, padx=10, pady=10)
+Label(frame, text="学习率:").grid(row=12, column=0, padx=10, pady=10)
 learning_rate_entry = Entry(frame)
 learning_rate_entry.insert(0, "0.001")
-learning_rate_entry.grid(row=9, column=1, padx=10, pady=10)
+learning_rate_entry.grid(row=12, column=1, padx=10, pady=10)
 
-Label(frame, text="训练轮数:").grid(row=10, column=0, padx=10, pady=10)
+Label(frame, text="训练轮数:").grid(row=13, column=0, padx=10, pady=10)
 epochs_entry = Entry(frame)
 epochs_entry.insert(0, "10")
-epochs_entry.grid(row=10, column=1, padx=10, pady=10)
+epochs_entry.grid(row=13, column=1, padx=10, pady=10)
 
 # 训练状态显示
 current_epoch_label = Label(frame, text="当前轮数: 0")
-current_epoch_label.grid(row=11, column=0, padx=10, pady=10)
+current_epoch_label.grid(row=14, column=0, padx=10, pady=10)
 train_loss_label = Label(frame, text="训练损失: 0.0000")
-train_loss_label.grid(row=11, column=1, padx=10, pady=10)
+train_loss_label.grid(row=14, column=1, padx=10, pady=10)
 train_acc_label = Label(frame, text="训练准确率: 0.0000")
-train_acc_label.grid(row=11, column=2, padx=10, pady=10)
+train_acc_label.grid(row=14, column=2, padx=10, pady=10)
 val_loss_label = Label(frame, text="验证损失: 0.0000")
-val_loss_label.grid(row=12, column=0, padx=10, pady=10)
+val_loss_label.grid(row=15, column=0, padx=10, pady=10)
 val_acc_label = Label(frame, text="验证准确率: 0.0000")
-val_acc_label.grid(row=12, column=1, padx=10, pady=10)
+val_acc_label.grid(row=15, column=1, padx=10, pady=10)
 
 # 开始训练和停止训练按钮
 start_button = Button(frame, text="开始训练", command=start_training)
-start_button.grid(row=13, column=1, padx=10, pady=20)
+start_button.grid(row=16, column=1, padx=10, pady=20)
 stop_button = Button(frame, text="停止训练", command=stop_training_callback, state="disabled")
-stop_button.grid(row=13, column=2, padx=10, pady=20)
+stop_button.grid(row=16, column=2, padx=10, pady=20)
 
 # 运行主循环
 root.mainloop()
